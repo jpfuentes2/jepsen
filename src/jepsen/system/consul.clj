@@ -18,16 +18,16 @@
             [slingshot.slingshot      :refer [try+]]
             [verschlimmbesserung.core :as v]))
 
-(def binary "/usr/local/bin/consul")
+(def binary "/usr/bin/consul")
 (def pidfile "/var/run/consul.pid")
-(def data-dir "/var/lib/etcd")
-(def log-file "/var/log/etcd.log")
+(def data-dir "/var/lib/consul")
+(def log-file "/var/log/consul.log")
 
 (defn peer-addr [node]
-  (str (name node) ":7001"))
+  (str (name node) ":8300"))
 
 (defn addr [node]
-  (str (name node) ":4001"))
+  (str (name node) ":8500"))
 
 (defn peers
   "The command-line peer list for an consul cluster."
@@ -54,18 +54,19 @@
           :--background
           :--make-pidfile
           :--pidfile        pidfile
-          :--chdir          "/opt/etcd"
+          :--chdir          "/opt/consul"
           :--exec           binary
-          :--no-close
           :--
-          :-peer-addr       (peer-addr node)
-          :-addr            (addr node)
-          :-peer-bind-addr  "0.0.0.0:7001"
-          :-bind-addr       "0.0.0.0:4001"
+          :agent
+          :-server
+          :-log-level       "debug"
+          :-client          "0.0.0.0"
+          :-bind            "0.0.0.0"
           :-data-dir        data-dir
-          :-name            (name node)
+          :-node            (name node)
+          (when (= node (core/primary test)) :-bootstrap)
           (when-not (= node (core/primary test))
-            [:-peers        (peers test)])
+            [:-join        "172.20.20.10"])
           :>>               log-file
           (c/lit "2>&1")))
 
@@ -73,19 +74,11 @@
   (let [running (atom nil)] ; A map of nodes to whether they're running
     (reify db/DB
       (setup! [this test node]
-        ; You'll need debian testing for this, cuz etcd relies on go 1.2
-        (debian/install [:golang :git-core])
-
         (c/su
           (c/cd "/opt"
                 (when-not (cu/file? "consul")
                   (info node "cloning consul")
-                  (c/exec :git :clone "https://github.com/hashicorp/consul")))
-
-          (c/cd "/opt/etcd"
-                (when-not (cu/file? "bin/etcd")
-                  (info node "building etcd")
-                  (c/exec (c/lit "./build"))))
+                  (c/exec (c/lit "mkdir consul"))))
 
           ; There's a race condition in cluster join we gotta work around by
           ; restarting the process until it doesn't crash; see
@@ -126,18 +119,18 @@
             (Thread/sleep 2000)
             (swap! running assoc node (running?)))
 
-          (info node "etcd ready")))
+          (info node "consul ready")))
 
       (teardown! [_ test node]
         (c/su
           (meh (c/exec :killall :-9 :consul))
-          (c/exec :rm :-rf data-dir log-file))
+          (c/exec :rm :-rf pidfile data-dir))
         (info node "consul nuked")))))
 
 (defrecord CASClient [k client]
   client/Client
   (setup! [this test node]
-    (let [client (v/connect (str "http://" (name node) ":4001"))]
+    (let [client (v/connect (str "http://" (name node) ":8500"))]
       (v/reset! client k (json/generate-string nil))
       (assoc this :client client)))
 
